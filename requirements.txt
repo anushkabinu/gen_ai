@@ -1,0 +1,19 @@
+# Project Python dependencies
+streamlit
+pandas
+numpy
+requests
+python-dotenv
+google-generativeai
+
+# Web scraping dependencies
+beautifulsoup4
+selenium
+webdriver-manager
+lxml
+
+# Web scraping dependencies
+selenium
+webdriver-manager
+beautifulsoup4
+lxml
