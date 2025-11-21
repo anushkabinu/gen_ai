@@ -12,8 +12,7 @@ selenium
 webdriver-manager
 lxml
 
-# Web scraping dependencies
-selenium
-webdriver-manager
-beautifulsoup4
-lxml
+# Vector database for caching
+chromadb
+sentence-transformers
+sentence-transformers

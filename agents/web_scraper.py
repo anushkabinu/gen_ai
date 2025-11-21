@@ -87,7 +87,7 @@ class WebScraperAgent:
             return []
     
     def scrape_flipkart_product_details(self, driver, link):
-        """Scrape detailed product info from Flipkart"""
+        """Scrape detailed product info from Flipkart including description"""
         driver.get(link)
         self.close_flipkart_popup(driver)
         time.sleep(2)
@@ -100,17 +100,54 @@ class WebScraperAgent:
         ]
         rating_selectors = [".ipqd2A", "div._3LWZlK", "div._2d4LTz", ".XQDdHH._6er70b"]
         features_selector = ".xFVion ._7eSDEz"
+        
+        # Description selectors - try multiple locations
+        description_selectors = [
+            "div._1mXcCf",  # Main description div
+            "div._2418kt",  # Product description
+            "div.UVia4p",   # Another description class
+            "p._2aZlEw",    # Description paragraph
+            "div[class*='description']",
+            "div._3eAQiD p",  # Description paragraph in container
+            "div._24d_e7 p",  # Another description location
+            "div._3GnEXt p",  # Product details paragraph
+            ".fMghDE",  # Description class
+            "div._3eAQiD",  # Full description div
+            "div._3GnEXt"   # Details container
+        ]
 
         name = self.get_first_text(driver, name_selectors)
         price = self.get_first_text(driver, price_selectors)
         rating = self.get_first_text(driver, rating_selectors)
         features = self.get_all_texts(driver, features_selector)
+        
+        # Get description - try multiple methods
+        description = self.get_first_text(driver, description_selectors)
+        
+        # If not found, try getting all paragraph texts from product details
+        if not description or description == "N/A" or len(description.strip()) < 20:
+            try:
+                # Get all paragraphs that might contain description
+                desc_elements = driver.find_elements(By.CSS_SELECTOR, "div._3eAQiD p, div._3GnEXt p, div._24d_e7 p")
+                if desc_elements:
+                    description = " ".join([e.text.strip() for e in desc_elements if e.text.strip() and len(e.text.strip()) > 10])
+            except:
+                pass
+        
+        # Last resort: try meta tags
+        if not description or description == "N/A" or len(description.strip()) < 20:
+            try:
+                meta_desc = driver.find_element(By.XPATH, "//meta[@name='description']")
+                description = meta_desc.get_attribute("content") if meta_desc else "N/A"
+            except:
+                description = "N/A"
 
         return {
             "name": name,
             "price": price,
             "rating": rating,
             "features": features,
+            "description": description,
             "url": link
         }
     
@@ -126,8 +163,38 @@ class WebScraperAgent:
         Returns:
             List of structured phone dictionaries
         """
-        search_url = f"https://www.flipkart.com/search?q={query.replace(' ', '+')}"
-        logger.info(f"🔍 Scraping Flipkart: {query}")
+        # Intelligent query processing
+        search_query = query.strip()
+        query_lower = search_query.lower()
+        
+        # Brand names that indicate we're looking for phones
+        phone_brands = ['iphone', 'samsung', 'galaxy', 'redmi', 'realme', 'oneplus', 'vivo', 
+                       'oppo', 'poco', 'nokia', 'motorola', 'xiaomi', 'nothing', 'iqoo', 
+                       'pixel', 'apple', 'mi', 'honor']
+        
+        # Check if query already has phone/mobile keywords or is a specific model
+        has_phone_keyword = any(word in query_lower for word in ['phone', 'mobile', 'smartphone'])
+        has_brand = any(brand in query_lower for brand in phone_brands)
+        
+        # If it's just a brand name (no model), add "mobile phone"
+        # If it's a specific model (has numbers/pro/max/ultra), keep as is
+        has_model_indicator = any(indicator in query_lower for indicator in 
+                                 ['pro', 'max', 'ultra', 'plus', 'lite', 'mini', 'note', 'edge', 'fold', 'flip']) or \
+                             any(char.isdigit() for char in search_query)
+        
+        if not has_phone_keyword:
+            if has_brand and not has_model_indicator:
+                # Just a brand name: "Samsung" -> "Samsung mobile phone"
+                search_query = f"{search_query} mobile phone"
+            elif has_brand and has_model_indicator:
+                # Specific model: "iPhone 15 Pro Max" -> keep as is (already specific)
+                pass
+            else:
+                # Generic search: "gaming" -> "gaming mobile phone"
+                search_query = f"{search_query} mobile phone"
+        
+        search_url = f"https://www.flipkart.com/search?q={search_query.replace(' ', '+')}&otracker=search&marketplace=FLIPKART"
+        logger.info(f"🔍 Scraping Flipkart: '{query}' -> '{search_query}'")
         
         # Setup Chrome options
         chrome_options = Options()
@@ -146,20 +213,43 @@ class WebScraperAgent:
             
             driver.get(search_url)
             self.close_flipkart_popup(driver)
-            time.sleep(3)
+            time.sleep(2)  # Give page time to load properly
 
-            # Get product links
+            # Get product links - look for mobile/phone specific links
             product_links = []
             seen = set()
-            links = driver.find_elements(By.XPATH, "//a[contains(@href, '/p/')]")
+            
+            # Try multiple selectors for product links
+            selectors = [
+                "//a[contains(@href, '/p/')]",
+                "//a[@class='CGtC98']",  # Flipkart product link class
+                "//a[contains(@class, 'wjcEIp')]"  # Another common class
+            ]
+            
+            all_links = []
+            for selector in selectors:
+                try:
+                    links = driver.find_elements(By.XPATH, selector)
+                    all_links.extend(links)
+                except:
+                    continue
 
-            for l in links:
-                link = l.get_attribute("href")
-                if link and link not in seen and 'flipkart.com' in link:
-                    product_links.append(link)
-                    seen.add(link)
-                if len(product_links) >= max_products:
-                    break
+            # Filter for phone/mobile related products
+            for l in all_links:
+                try:
+                    link = l.get_attribute("href")
+                    if not link or link in seen or 'flipkart.com' not in link:
+                        continue
+                    
+                    # Check if link contains /p/ (product page indicator)
+                    if '/p/' in link:
+                        product_links.append(link)
+                        seen.add(link)
+                    
+                    if len(product_links) >= max_products:
+                        break
+                except:
+                    continue
 
             logger.info(f"🧩 Found {len(product_links)} product links")
 
@@ -170,15 +260,10 @@ class WebScraperAgent:
                 try:
                     prod = self.scrape_flipkart_product_details(driver, link)
                     all_products.append(prod)
-                    time.sleep(2)  # Be respectful
+                    time.sleep(0.5)  # Reduced wait time for faster scraping
                 except Exception as e:
                     logger.error(f"Error scraping {link}: {e}")
                     continue
-
-            # Save raw data
-            output_file = self.data_dir / "flipkart_raw.json"
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(all_products, f, ensure_ascii=False, indent=2)
 
             logger.info(f"✅ Scraped {len(all_products)} Flipkart products")
             
@@ -197,11 +282,37 @@ class WebScraperAgent:
         """Convert raw Flipkart data to structured phone data"""
         structured = []
         
+        # Keywords that indicate non-phone items to filter out
+        exclude_keywords = ['case', 'cover', 'charger', 'cable', 'screen guard', 'protector', 
+                           'earphone', 'headphone', 'adapter', 'battery', 'power bank', 'stand',
+                           'holder', 'tempered glass', 'pouch', 'flip cover', 'back cover']
+        
         for prod in raw_products:
             try:
+                product_name = prod['name'].lower()
+                
+                # Skip accessories and non-phone items
+                if any(keyword in product_name for keyword in exclude_keywords):
+                    logger.info(f"⏭️ Skipping accessory: {prod['name']}")
+                    continue
+                
+                # Must have phone/mobile related keywords or be a brand name
+                phone_keywords = ['phone', 'mobile', 'smartphone', 'iphone', 'galaxy', 'redmi', 
+                                'realme', 'oneplus', 'vivo', 'oppo', 'poco', 'nokia', 'motorola',
+                                'samsung', 'xiaomi', 'nothing', 'iqoo', 'pixel']
+                
+                if not any(keyword in product_name for keyword in phone_keywords):
+                    logger.info(f"⏭️ Skipping non-phone: {prod['name']}")
+                    continue
+                
                 # Extract price
                 price_text = prod['price'].replace('₹', '').replace(',', '')
                 price = int(re.search(r'\d+', price_text).group()) if re.search(r'\d+', price_text) else 0
+                
+                # Skip if price is too low (likely accessories) or too high (likely error)
+                if price < 5000 or price > 200000:
+                    logger.info(f"⏭️ Skipping invalid price: {prod['name']} - ₹{price}")
+                    continue
                 
                 # Extract rating
                 rating_text = prod['rating']
@@ -222,10 +333,11 @@ class WebScraperAgent:
                         'camera_mp': specs.get('camera_mp', 12),
                         'battery_mah': specs.get('battery_mah', 4000),
                         'display_inches': specs.get('display_inches', 6.5),
-                        'processor': specs.get('processor', 'Unknown'),
+                        'processor': specs.get('processor', 'Unknown') if specs.get('processor') != 'Unknown' else prod.get('name', 'Unknown').split()[-1] if 'Snapdragon' in prod.get('name', '') or 'Dimensity' in prod.get('name', '') or 'Bionic' in prod.get('name', '') else 'Unknown',
                         'category': self._categorize_phone(price),
                         'source': 'Flipkart',
-                        'url': prod['url']
+                        'url': prod['url'],
+                        'description': prod.get('description', 'N/A')
                     })
             except Exception as e:
                 logger.error(f"Error structuring product: {e}")

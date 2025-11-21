@@ -12,23 +12,37 @@ try:
 except ImportError:
     genai = None
 
-# Import the web scraper
+# Import the web scraper and cache
 try:
     from .web_scraper import WebScraperAgent
 except ImportError:
     WebScraperAgent = None
+
+try:
+    from .phone_cache import PhoneCache
+except ImportError:
+    PhoneCache = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class DataFetchAgent:
-    """Agent responsible for fetching LIVE smartphone data with Gemini AI enhancement"""
+    """Agent responsible for fetching LIVE smartphone data with Gemini AI enhancement and ChromaDB caching"""
     
     def __init__(self):
-        """Initialize Data Fetch Agent with empty database (scrape on demand)"""
+        """Initialize Data Fetch Agent with ChromaDB cache"""
         self.web_scraper = WebScraperAgent() if WebScraperAgent else None
-        self.phone_database = pd.DataFrame()  # Start empty
+        self.phone_database = pd.DataFrame()  # In-memory database
+        
+        # Initialize ChromaDB cache
+        self.cache = PhoneCache() if PhoneCache else None
+        if self.cache:
+            # Load all cached phones into memory on startup
+            cached_df = self.cache.get_all_cached_phones()
+            if not cached_df.empty:
+                self.phone_database = cached_df
+                logger.info(f"📦 Loaded {len(cached_df)} phones from cache")
         
         # Initialize Gemini
         self.model = None
@@ -42,32 +56,56 @@ class DataFetchAgent:
                 logger.error(f"❌ DataFetch Agent: Failed to init Gemini: {e}")
                 self.model = None
         
-        logger.info("📱 DataFetch Agent initialized. Database empty - scrape from frontend when needed.")
+        logger.info("📱 DataFetch Agent initialized with ChromaDB cache.")
     
-    def scrape_live_phones(self, query: str = "smartphone", max_phones: int = 20) -> pd.DataFrame:
+    def scrape_live_phones(self, query: str = "smartphone", max_phones: int = 20, max_budget: int = None) -> pd.DataFrame:
         """
         Scrape LIVE phone data from Flipkart (called from frontend on demand)
+        First checks cache, only scrapes if not found
+        Uses AI to enhance query understanding
         
         Args:
             query: Search query for Flipkart
             max_phones: Maximum phones to scrape
+            max_budget: Maximum budget to help filter results
             
         Returns:
-            DataFrame with newly scraped phones
+            DataFrame with phones (from cache or freshly scraped)
         """
+        # Enhance query with AI understanding
+        enhanced_query = self._enhance_query_with_ai(query, max_budget)
+        # Check cache first with enhanced query
+        if self.cache:
+            cached_phones = self.cache.search_in_cache(enhanced_query, limit=max_phones)
+            if cached_phones and len(cached_phones) > 0:
+                logger.info(f"✅ Found {len(cached_phones)} phones in cache for '{enhanced_query}' (original: '{query}')")
+                df = pd.DataFrame(cached_phones)
+                
+                # Add to in-memory database
+                self.phone_database = pd.concat([self.phone_database, df], ignore_index=True)
+                self.phone_database = self.phone_database.drop_duplicates(subset=['full_name'], keep='last')
+                
+                return df
+        
+        # Not in cache - scrape from web
         if not self.web_scraper:
             logger.error("❌ Web scraper not available")
             return pd.DataFrame()
         
         try:
-            logger.info(f"🌐 Scraping live data from Flipkart: '{query}'...")
-            scraped_data = self.web_scraper.scrape_flipkart(query, max_products=max_phones)
+            logger.info(f"🌐 Not in cache. Scraping live data from Flipkart: '{enhanced_query}'...")
+            scraped_data = self.web_scraper.scrape_flipkart(enhanced_query, max_products=max_phones)
             
             # Convert list to DataFrame
             if scraped_data and len(scraped_data) > 0:
                 df = pd.DataFrame(scraped_data)
                 
-                # Add to database
+                # Add to cache
+                if self.cache:
+                    self.cache.add_phones(scraped_data)
+                    logger.info(f"💾 Cached {len(scraped_data)} phones")
+                
+                # Add to in-memory database
                 self.phone_database = pd.concat([self.phone_database, df], ignore_index=True)
                 self.phone_database = self.phone_database.drop_duplicates(subset=['full_name'], keep='last')
                 logger.info(f"✅ Scraped {len(df)} new phones. Total in database: {len(self.phone_database)}")
@@ -110,6 +148,46 @@ class DataFetchAgent:
         logger.info(f"Fetched {len(df)} phones matching criteria")
         return df
     
+    def _enhance_query_with_ai(self, query: str, max_budget: int = None) -> str:
+        """
+        Use AI to enhance user query for better phone search
+        Understands intent: gaming, photography, budget, premium, etc.
+        """
+        if not self.model or not query:
+            return query
+        
+        try:
+            budget_hint = f" under ₹{max_budget:,}" if max_budget and max_budget > 0 else ""
+            
+            prompt = f"""You are a phone search expert. Enhance this search query for better Flipkart results.
+
+User Query: "{query}"{budget_hint}
+
+Rules:
+1. If user says "gaming" -> add "gaming phone" or specific gaming phones
+2. If user says "camera" or "photography" -> add "camera phone" or phones known for cameras
+3. If user mentions brand only (Samsung, iPhone) -> keep brand but make it specific
+4. If user mentions specific model (iPhone 15 Pro) -> keep exact model name
+5. If budget mentioned -> prefer mid-range or flagship terms accordingly
+6. Keep query SHORT and SEARCHABLE (max 4-5 words)
+7. Don't add price in query, just phone characteristics
+
+Return ONLY the enhanced search query, nothing else."""
+            
+            response = self.model.generate_content(prompt)
+            enhanced = response.text.strip().strip('"').strip("'")
+            
+            # Validate enhancement
+            if len(enhanced) > 50 or not enhanced:
+                return query
+            
+            logger.info(f"🧠 Query enhanced: '{query}' -> '{enhanced}'")
+            return enhanced
+            
+        except Exception as e:
+            logger.error(f"Query enhancement failed: {e}")
+            return query
+    
     def fetch_phones_by_specs(self,
                                brands: Optional[List[str]] = None,
                                max_price: Optional[int] = None,
@@ -142,9 +220,12 @@ class DataFetchAgent:
         if brands and len(brands) > 0:
             df = df[df['brand'].isin(brands)]
         
-        # Apply budget filter
+        # Apply budget filter - prioritize phones near max budget
         if max_price is not None and max_price > 0:
-            df = df[df['price'] <= max_price]
+            # Filter out phones way over budget
+            df = df[df['price'] <= max_price * 1.1]  # Allow 10% over for better options
+            # Add a score favoring phones closer to max budget
+            df['budget_match_score'] = df['price'].apply(lambda p: 100 - abs(max_price - p) / max_price * 100)
         
         # Apply spec filters
         if min_ram is not None and min_ram > 0:

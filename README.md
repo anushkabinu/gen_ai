@@ -1,12 +1,8 @@
-# 📱 Smart Gadget Advisor# Smart Gadget Advisor 🤖
+# 📱 Smart Gadget Advisor
 
+**AI-Powered Phone Recommendation System with Live Web Scraping & ChromaDB Caching**
 
-
-**AI-Powered Phone Recommendation System with Live Web Scraping****AI-Powered by Google Gemini** | Intelligent Smartphone Recommendations & Comparisons
-
-
-
-## 🌟 Features# Smart Gadget Advisor 🤖
+## 🌟 Key Features
 
 
 

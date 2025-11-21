@@ -168,10 +168,10 @@ class RecommenderAgent:
             axis=1
         )
         
-        # Sort by score and rating
+        # Sort by score, then prioritize phones closer to max budget
         recommended = phones_df.sort_values(
-            by=['recommendation_score', 'rating'],
-            ascending=False
+            by=['recommendation_score', 'price', 'rating'],
+            ascending=[False, False, False]
         ).head(top_n)
         
         logger.info(f"Generated {len(recommended)} recommendations for priority: {priority}")
